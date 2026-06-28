@@ -1,0 +1,19 @@
+# Build output
+build/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+
+# Compile commands (generated)
+compile_commands.json
