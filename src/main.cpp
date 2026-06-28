@@ -133,12 +133,20 @@ int main(int argc, char** argv) {
                 lfs::pkt_write("hash-algo=sha256\n");
                 lfs::pkt_delim();
                 for (const auto& o : objs) {
-                    const std::string action =
-                        lfs::object_exists(objects_dir, o.oid) ? "noop" : "upload";
+                    // action depends on operation:
+                    //   download: existing → "download", missing → "noop"
+                    //   upload:   existing → "noop",     missing → "upload"
+                    const bool exists = lfs::object_exists(objects_dir, o.oid);
+                    std::string action;
+                    if (op == "upload") {
+                        action = exists ? "noop" : "upload";
+                    } else {
+                        action = exists ? "download" : "noop";
+                    }
                     lfs::pkt_write(o.oid + " " + std::to_string(o.size) + " " + action + "\n");
                 }
                 lfs::pkt_flush();
-                lfs::log("Batch response sent");
+                lfs::log("Batch response sent (" + std::to_string(objs.size()) + " objects)");
             }
             // ---- put-object ----
             else if (cmd.rfind("put-object ", 0) == 0) {
@@ -211,6 +219,70 @@ int main(int argc, char** argv) {
                 lfs::pkt_write("status 200\n");
                 lfs::pkt_delim();
                 lfs::pkt_flush();
+            }
+            // ---- get-object (download) ----
+            else if (cmd.rfind("get-object ", 0) == 0) {
+                std::string oid = cmd.substr(11);
+                lfs::trim_line(oid);
+                std::size_t expected = 0;
+                // get-object arguments are terminated by flush-pkt (0000)
+                while (true) {
+                    n = lfs::pkt_read(line);
+                    if (n == 0)
+                        break;
+                    if (n < 0) {
+                        running = false;
+                        break;
+                    }
+                    if (n == 1)
+                        continue;  // skip delimiter if any
+                    lfs::trim_line(line);
+                    if (line.rfind("size=", 0) == 0) {
+                        try {
+                            expected = std::stoull(line.substr(5));
+                        } catch (...) {
+                        }
+                    }
+                }
+                if (!running)
+                    break;
+
+                const std::string path = lfs::lfs_object_path(objects_dir, oid);
+                lfs::log("get-object oid=" + oid +
+                         " size=" + std::to_string(expected) + " path=" + path);
+
+                std::ifstream ifs(path, std::ios::binary | std::ios::ate);
+                if (!ifs) {
+                    lfs::log("FILE OPEN FAIL: " + path);
+                    lfs::pkt_write("status 404\n");
+                    lfs::pkt_flush();
+                    continue;
+                }
+
+                const auto file_size = ifs.tellg();
+                ifs.seekg(0, std::ios::beg);
+
+                lfs::pkt_write("status 200\n");
+                lfs::pkt_write("size=" + std::to_string(file_size) + "\n");
+                lfs::pkt_delim();
+
+                // Stream object data using pkt-line encoding
+                std::vector<char> buf(65516);  // max payload per pkt-line
+                while (ifs.read(buf.data(), static_cast<std::streamsize>(buf.size())) ||
+                       ifs.gcount() > 0) {
+                    const auto count = static_cast<std::size_t>(ifs.gcount());
+                    if (count == 0)
+                        break;
+                    // Write pkt-line: 4-byte hex length + payload
+                    char hdr[5];
+                    std::snprintf(hdr, sizeof(hdr), "%04zx", count + 4);
+                    std::cout.write(hdr, 4);
+                    std::cout.write(buf.data(), static_cast<std::streamsize>(count));
+                }
+                ifs.close();
+                lfs::pkt_flush();
+                lfs::log("get-object done: " + oid +
+                         " (" + std::to_string(file_size) + " bytes)");
             }
             // ---- verify-object ----
             else if (cmd.rfind("verify-object ", 0) == 0) {
